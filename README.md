@@ -1,5 +1,9 @@
+
 # Chariot
 A path planning algorithm implementation 
+
+For setup instructions please refer to the following repository
+https://github.com/udacity/CarND-Path-Planning-Project
 
 Code outline:
 The entire code can be divided into two major blocks, 
@@ -18,6 +22,9 @@ Input received from the simulator is processed using API process_data()
   6) Depending on the velocity of car, append remaining points to the partially filled list from step b)
   7) Convert these points back to global coordinate space and append them to next_x_vals and next_y_vals vector list
 
+Figure below illustrates how trajectory is generated using spline tool.
+![Alt text](imgs/Trajecotry_generation.png?raw=true "Trajectory generation")
+
 #### Behavioral planning
 After the points are created for the car to follow, next step is to check if the car is safe in the existing lane or would it need to switch lanes to move faster without influence of traffic. check_lane_change() API does the task of handling lane change requirements
 
@@ -32,3 +39,6 @@ After the points are created for the car to follow, next step is to check if the
   6) While switching lanes, the car is slowed down and then maneuvered to destination lane. slowdown mode ensures there are no abrupt velocity/acceleration changes
   7) If the lane change is not required, car tries to accelerate and drive at max speed (48 mph here)
   8) After a lane change, the car stays in cooldown mode for aroud ~1.5 sec; where it stays in the same.
+
+Illustration below shows how the car sees free space in the middle lane and switches to this lane to move faster towards goal.
+![Alt text](imgs/behavioral_planning.png?raw=true "Behavioral planning")
