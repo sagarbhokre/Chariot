@@ -20,18 +20,24 @@ constexpr double pi() { return M_PI; }
 double deg2rad(double x) { return x * pi() / 180; }
 double rad2deg(double x) { return x * 180 / pi(); }
 
-#define MPS2MPH (2.23694)
-#define SPEW_LVL (0)
-#define COLLISION_THRESHOLD (30)
+#define MPS2MPH              (2.23694)
+#define SPEW_LVL             (1)
+#define LANE_CHANGE_DIST_THRESHOLD (50)
+#define COLLISION_THRESHOLD  (20)
+#define BACK_COLLISION_THRESHOLD (1)
 #define LOOK_AHEAD_THRESHOLD (50)
-#define BACK_COLLISION_THRESHOLD (-7)
+#define CAR_DIM              (5.0)
+#define SLOWDOWN_RANGE       (0)
+#define COOLDOWN_RANGE       (10)
+#define MAX_ACCELERATION     (7*MPS2MPH*MPS2MPH)
+#define NUM_POINTS           (50)
 
-double MIN_SPEED = 1.0;
-double MAX_SPEED = 48.0;
-double SPEED_DELTA = 0.18;
+double MIN_SPEED = 20.0;
+double MAX_SPEED = 49.5;
 double ref_speed = 1; //MIN_SPEED;
 int LANE_ID = -1;
 int desired_lane = -1;
+bool initialized =  false;
 
 typedef struct sensor_data_t_ {
     uint32_t id;
@@ -230,24 +236,24 @@ void convert2local_vec(vector<double> &sx, vector<double> &sy, double x, double 
     }
 }
 
-void update_ref_vel(double val, double min_speed = MIN_SPEED)
+void update_ref_vel(double val,
+                    double min_speed = MIN_SPEED,
+                    double max_speed = MAX_SPEED)
 {
-    ref_speed += val;
-    if(ref_speed > MAX_SPEED) ref_speed = MAX_SPEED;
-    if(ref_speed < min_speed) ref_speed = min_speed;
+    double sign = signbit(val) ? -1.0 : 1.0;
+    ref_speed += MAX_ACCELERATION*0.02*sign;
+
+    if(SPEW_LVL > 4) cout << "Add term : " << MAX_ACCELERATION*0.02*sign << endl;
+
+    if(ref_speed > max_speed) ref_speed = max_speed;
+    if((ref_speed < min_speed) && initialized) ref_speed = min_speed;
+    if(ref_speed >= max_speed) initialized = true;
 }
 
-void set_ref_vel(double vel)
-{
-    ref_speed = vel;
-    if(ref_speed > MAX_SPEED) ref_speed = MAX_SPEED;
-    if(ref_speed < MIN_SPEED) ref_speed = MIN_SPEED;
-}
-
-void check_lane_change(vector<sensor_data_t> sensor_data, vector<double> n_x, vector<double> n_y,
+bool check_lane_change(vector<sensor_data_t> sensor_data, vector<double> n_x, vector<double> n_y,
                        vector<double> map_waypoints_x, vector<double> map_waypoints_y,
                        vector<double> map_waypoints_s,
-                       double car_s, double car_d)
+                       double car_s, double car_d, double car_speed)
 {
     bool change_lane = false;
     vector<sensor_data_t> l_sensor_data[3];
@@ -268,70 +274,97 @@ void check_lane_change(vector<sensor_data_t> sensor_data, vector<double> n_x, ve
 
     bool safe[3];
     double coll_dist[3];
+    double coll_ndist[3];
     double coll_vel[3];
+    double coll_nvel[3];
     static int cooldown = 200, slowdown = 0;
 
     // Find vel, distance of objects in all lanes
     for(int lane = 0; lane < 3; lane++) {
         safe[lane] = true;
         coll_dist[lane] = COLLISION_THRESHOLD*10; //Large number
+        coll_ndist[lane] = -COLLISION_THRESHOLD*10; //Large number
+        coll_vel[lane] = MIN_SPEED;
         for(int idx = 0; idx < l_sensor_data[lane].size(); idx++) {
             double diff = l_sensor_data[lane][idx].s - car_s;
+            double vel = l_sensor_data[lane][idx].v;
+            double rel_vel = vel - car_speed;
+            if (rel_vel < 0.0) rel_vel = 0.0;
+
+            if ((SPEW_LVL > 3) && (diff < 0) && (abs(LANE_ID -lane) == 1)) {
+                cout << "["<<lane<<"] diff: " << diff << " rel_vel: " << rel_vel
+                     << " " << CAR_DIM+BACK_COLLISION_THRESHOLD*rel_vel
+                     << endl;
+            }
 
             // Distance behind and ahead of car is acceptable?
-            if ((diff < COLLISION_THRESHOLD) && (diff > BACK_COLLISION_THRESHOLD)) {
+            if (((diff > 0) && (diff < LANE_CHANGE_DIST_THRESHOLD)) ||
+                ((diff < 0) && (-diff < (CAR_DIM + BACK_COLLISION_THRESHOLD*rel_vel)))) {
                 safe[lane] = false;
             }
 
             // Least of all objects in the same lane
             if ((diff > 0) && (diff < coll_dist[lane])) {
                 coll_dist[lane] = diff;
-                coll_vel[lane] = l_sensor_data[lane][idx].v;
+                // Consider measurements until 150m to avoid false/frequent lane changes
+                if(coll_dist[lane] > 150) coll_dist[lane] = COLLISION_THRESHOLD*10;
+                coll_vel[lane] = vel > MAX_SPEED ?  MAX_SPEED : vel;
+            }
+            else if((diff < 0) && (diff > coll_ndist[lane])) {
+                coll_ndist[lane] = diff;
+                coll_nvel[lane] = vel;
             }
         }
 
         // Check if we need to change lane due to object in front
         if ((LANE_ID == lane) && (coll_dist[lane] < COLLISION_THRESHOLD)) {
             change_lane = true;
-            // Reduce speed until it matches object in front
-            if((ref_speed > (coll_vel[lane]-10.0))) {
-                cout << endl << "- speed " << coll_vel[lane] <<  " ref: " << ref_speed << endl;
-            }
         }
     }
 
     // Info print
-    printf("\n%2.2f [%d]", ref_speed, LANE_ID);
-    for(int lane = 0; lane < 3; lane++) {
-        printf("|  %3.2f[%d]  |", coll_dist[lane], l_sensor_data[lane].size());
-        // Consider measurements until 150m to avoid false/frequent lane changes
-        if(coll_dist[lane] > 150) coll_dist[lane] = COLLISION_THRESHOLD*10;
+    if(SPEW_LVL > 0) {
+        printf("\n%2.2f [%d]", ref_speed, LANE_ID);
+        for(int lane = 0; lane < 3; lane++) {
+            printf("| %7.2f,%5.2f[%d][%s]  |", coll_dist[lane], coll_vel[lane],
+                                               (int)l_sensor_data[lane].size(),
+                                               safe[lane] ? "^" : "_");
+        }
+
+        printf("\n%2.2f [%d]", ref_speed, LANE_ID);
+        for(int lane = 0; lane < 3; lane++) {
+            printf("| %7.2f,%5.2f[%d][%s]  |", coll_ndist[lane], coll_nvel[lane],
+                                               (int)l_sensor_data[lane].size(),
+                                               safe[lane] ? "^" : "_");
+        }
+        printf("\n");
     }
-    printf("\n");
 
     // cooldown ensures we allow the car to settle before switching lane again
     if((cooldown-- <= 0)) {
         int best_lane = LANE_ID;
-        double best_dist = 0;
+        double best_dist = coll_dist[LANE_ID];
         for (int i = 0; i < 3; i++) {
-            if ((coll_dist[i] > best_dist) && (abs(LANE_ID - i) <= 1) && (safe[i] == true)) {
+            if ((coll_dist[i] > best_dist) && (abs(LANE_ID - i) <= 1) &&
+                (safe[i] == true)) {
+
                 best_lane = i;
                 best_dist = coll_dist[i];
             }
         }
 
         //  Avoid changing lane if not needed
-        if(abs(best_dist - coll_dist[LANE_ID]) < 0.01) {
+        if(abs(best_dist - coll_dist[LANE_ID]) < 2) {
             best_lane = LANE_ID;
         }
 
-        // Set desired lane and wait for slowdown before switching lane. 
+        // Set desired lane and wait for slowdown before switching lane.
         // Switching lanes at faster speed lead to acceleration overshoot
         if(LANE_ID != best_lane) {
             cout << "------------Switch from lane " << LANE_ID;
             desired_lane = best_lane;
-            cooldown = 90;
-            slowdown = 17;
+            cooldown = COOLDOWN_RANGE;
+            slowdown = SLOWDOWN_RANGE;
             cout << " to lane " << best_lane << endl;
         }
     }
@@ -346,15 +379,53 @@ void check_lane_change(vector<sensor_data_t> sensor_data, vector<double> n_x, ve
     double dist = coll_dist[LANE_ID] > COLLISION_THRESHOLD ? COLLISION_THRESHOLD : coll_dist[LANE_ID];
     if (slowdown-- > 0) {
         printf("\n SD \n");
-        update_ref_vel(-1.5*SPEED_DELTA, 10.0);
+        update_ref_vel(-1.0, MIN_SPEED, MAX_SPEED);
+        return true; //Flush prev val
     }
     else if ((change_lane == false)) {
         // Accelerate if we plan to stay in the same lane
-        update_ref_vel(SPEED_DELTA*(dist/COLLISION_THRESHOLD), 10.0);
+        update_ref_vel(1.0, MIN_SPEED, MAX_SPEED);
     }
     else if((change_lane == true)) {
-        update_ref_vel(-3.0*SPEED_DELTA*(1.0 - dist/COLLISION_THRESHOLD), 10.0);
+        double follow_vel = coll_vel[LANE_ID]*(dist/COLLISION_THRESHOLD);
+        update_ref_vel(-1.0, MIN_SPEED, MAX_SPEED);
+        return true; //Flush prev val
     }
+    return false;
+}
+
+void analyze_path(vector<double> xs, vector<double> ys)
+{
+    vector<double> vs, as;
+
+    for(int i=0; i<xs.size()-1; i++) {
+        vs.push_back(distance(xs[i+1], ys[i+1], xs[i], ys[i])/0.02);
+    }
+
+    for(int i=0; i<vs.size()-1; i++) {
+        as.push_back(abs((vs[i+1]- vs[i])/0.02));
+    }
+
+    cout << "XYs: ";
+    for(int i=0; i<xs.size(); i++) {
+        cout << "(" << xs[i] << ", " << ys[i] << ") ";
+    }
+    cout << endl;
+
+    cout << "Vs: ";
+    for(int i=0; i<vs.size(); i++) {
+        cout << vs[i]*MPS2MPH << " ";
+    }
+    cout << endl;
+
+    cout << "As: ";
+    for(int i=0; i<as.size(); i++) {
+        cout << as[i] << " ";
+    }
+    cout << endl;
+    double max_acc = *std::max_element(as.begin(), as.end());
+    cout << " Max : " << *std::max_element(as.begin(), as.end()) << endl;
+    if(max_acc > MAX_ACCELERATION) exit(0);
 }
 
 void process_data(double &car_x, double &car_y,
@@ -374,6 +445,14 @@ void process_data(double &car_x, double &car_y,
     double angle;
     vector<double> sx, sy;
     int path_size = previous_path_x.size();
+    static bool flush_readings = false;
+
+    if(flush_readings ==  true) {
+        path_size = 2;
+        if(SPEW_LVL > 3) cout << "-------------------Flush readings----------------" << endl;
+        //ref_speed = car_speed;
+        flush_readings = false;
+    }
 
     // Initialize next vals with previously available points
     for(int i = 0; i < path_size; i++)
@@ -422,21 +501,28 @@ void process_data(double &car_x, double &car_y,
     tk::spline f_s;
     f_s.set_points(sx, sy);
 
-    double dist_inc = (ref_speed / MPS2MPH)/50;
+    double dist_inc = (ref_speed / MPS2MPH)/NUM_POINTS;
     double lx, ly, gx, gy;
+    double tx1, tx2, ty2, ty1;
     convert2local(pos_x, pos_y, ref_x, ref_y, ref_yaw, lx, ly);
+    convert2local(pos_x, pos_y, ref_x, ref_y, ref_yaw, tx1, ty1);
+    convert2local(pos_x2, pos_y2, ref_x, ref_y, ref_yaw, tx2, ty2);
+    pos_x = tx1; pos_y = ty1;
+    angle = atan2(ty1-ty2,tx1-tx2);
 
-    for(int i = 0; i < 50-path_size; i++)
+    double prev_x = lx, prev_y = ly;
+    for(int i = 0; i < NUM_POINTS-path_size; i++)
     {
-        lx += dist_inc;
+        lx += dist_inc*abs(cos(angle)*cos(angle));
         ly = f_s(lx);
+
         gx = (lx)*cos(ref_yaw) - (ly)*sin(ref_yaw);
         gy = (lx)*sin(ref_yaw) + (ly)*cos(ref_yaw);
 
         gx += ref_x;
         gy += ref_y;
-        if(SPEW_LVL > 3) {
-            cout << "dist_inc: " << dist_inc 
+        if((SPEW_LVL > 3)) {
+            cout << "dist_inc: " << dist_inc*NUM_POINTS*MPS2MPH
                  << " lx: " << lx << " ly: " << ly
                  << " gx: " << gx << " gy: " << gy << endl;
         }
@@ -445,10 +531,14 @@ void process_data(double &car_x, double &car_y,
         next_y_vals.push_back(gy);
         angle = atan2(ly-pos_y, lx-pos_x);
         pos_x = lx; pos_y = ly;
+        prev_x = lx; prev_y = ly;
     }
 
-    check_lane_change(sensor_data, next_x_vals, next_y_vals,
-                      map_waypoints_x, map_waypoints_y, map_waypoints_s, car_s, car_d);
+    if(SPEW_LVL > 3) analyze_path(next_x_vals, next_y_vals);
+
+    flush_readings = check_lane_change(sensor_data, next_x_vals, next_y_vals,
+                                       map_waypoints_x, map_waypoints_y,
+                                       map_waypoints_s, car_s, car_d, car_speed);
 
     return;
 }
