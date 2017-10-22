@@ -22,8 +22,8 @@ double rad2deg(double x) { return x * 180 / pi(); }
 
 #define MPS2MPH              (2.23694)
 #define SPEW_LVL             (1)
-#define LANE_CHANGE_DIST_THRESHOLD (50)
-#define COLLISION_THRESHOLD  (20)
+#define LANE_CHANGE_DIST_THRESHOLD (40)
+#define COLLISION_THRESHOLD  (30)
 #define BACK_COLLISION_THRESHOLD (1)
 #define LOOK_AHEAD_THRESHOLD (50)
 #define CAR_DIM              (5.0)
